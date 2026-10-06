@@ -317,6 +317,7 @@ var S = {
   lyrIdx: -2
 };
 try { S.fav = JSON.parse(ls('lcs.fav') || '[]') || []; } catch (e) { S.fav = []; }
+S.nextQi = -1;              // 已规划好的下一首在队列里的下标
 if (MODES.indexOf(MODES[S.mode]) < 0) S.mode = 0;
 if (BRS.indexOf(S.q) < 0) S.q = 999;
 
@@ -324,13 +325,29 @@ var audio = new Audio();
 audio.preload = 'auto';
 audio.setAttribute('playsinline', '');
 var seeking = false;
+var wantPlay = false;      // 期望处于播放状态（用户点的 or 自动切歌）
+var retryPending = false;  // play() 被系统拒绝（多为后台），等回到前台补播
+
 function safePlay(msg) {
-  try {
-    var p = audio.play();
-    if (p && typeof p.catch === 'function') {
-      p.catch(function () { if (msg) toast(msg); paint(); });
-    }
-  } catch (e) { if (msg) toast(msg); paint(); }
+  wantPlay = true;
+  var p = null;
+  try { p = audio.play(); } catch (e) {}
+  if (p && typeof p.then === 'function') {
+    p.then(function () { retryPending = false; })
+     .catch(function () {
+       // 后台被拒不要放弃：记下来，页面可见时补播
+       retryPending = true;
+       if (msg && !document.hidden) toast(msg);
+       paint();
+     });
+  }
+  return p;
+}
+
+function safePause() {
+  wantPlay = false;
+  retryPending = false;
+  audio.pause();
 }
 
 var el = {};
@@ -442,6 +459,42 @@ function apiUrl(id) {
     });
   }
   return step();
+}
+
+/* ---------- 播放地址缓存 + 预取（后台连播的关键） ----------
+   iOS 后台里，从异步回调调 play() 会被系统拒绝。
+   所以要在当前曲目播到一半时，就把下一首的播放地址取回来缓存好，
+   这样 ended 时能同步换上 src 并起播，中间不跨 await。 */
+var urlCache = {}, urlFetching = {}, urlFailed = {};
+
+function urlKeyOf(s) { return String(urlIdOf(s)); }
+function cachedUrl(s) { return urlCache[urlKeyOf(s)] || ''; }
+
+function fetchUrl(s) {
+  var k = urlKeyOf(s);
+  if (urlCache[k]) return Promise.resolve(urlCache[k]);
+  if (urlFetching[k]) return urlFetching[k];
+  var p = apiUrl(urlIdOf(s)).then(function (u) {
+    delete urlFetching[k];
+    if (u) { urlCache[k] = u; delete urlFailed[k]; }
+    else { urlFailed[k] = 1; }
+    return u || '';
+  }).catch(function () { delete urlFetching[k]; urlFailed[k] = 1; return ''; });
+  urlFetching[k] = p;
+  return p;
+}
+
+function prefetchNext() {
+  if (S.mode === 1) return;                      // 单曲循环不用预取
+  if (!S.queue.length || S.qi < 0) return;
+  var i = S.nextQi;
+  if (!(i >= 0 && i < S.queue.length)) {         // 还没规划下一首就现在定
+    i = nextIndex(1);
+    if (i < 0 || i === S.qi) return;
+    S.nextQi = i;
+  }
+  var s = S.queue[i];
+  if (s && !cachedUrl(s) && !urlFailed[urlKeyOf(s)]) fetchUrl(s);
 }
 
 /* ---------- 歌词 ---------- */
@@ -572,7 +625,7 @@ function mediaHooks() {
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.setActionHandler('play', function () { safePlay(); });
-    navigator.mediaSession.setActionHandler('pause', function () { audio.pause(); });
+    navigator.mediaSession.setActionHandler('pause', function () { safePause(); });
     navigator.mediaSession.setActionHandler('previoustrack', function () { prev(); });
     navigator.mediaSession.setActionHandler('nexttrack', function () { next(); });
   } catch (e) {}
@@ -592,7 +645,8 @@ function start(s) {
   S.cur = s;
   S.curKey = keyOf(s);
   S.lyrIdx = -2;
-  audio.pause();
+  S.nextQi = -1;                    // 换歌后下一首重新规划
+  if (!audio.paused) audio.pause();
   paint();
   render();
   loadLyric(s);
@@ -601,13 +655,21 @@ function start(s) {
   el.tcur.textContent = '0:00';
   el.tdur.textContent = '0:00';
   el.artbox.style.opacity = '.5';
-  apiUrl(urlIdOf(s)).then(function (u) {
+
+  var u = cachedUrl(s);
+  if (u) { playUrl(u, s); return; }               // 命中预取：同步起播
+  fetchUrl(s).then(function (u2) {
     if (S.cur !== s) return;
-    el.artbox.style.opacity = '';
-    if (!u) { toast('该曲目暂无可用播放地址'); return; }
-    audio.src = u;
-    safePlay('点击播放键开始');
+    playUrl(u2, s);
   });
+}
+
+function playUrl(u, s) {
+  el.artbox.style.opacity = '';
+  if (!u) { toast('该曲目暂无可用播放地址'); return; }
+  audio.src = u;
+  safePlay('点击播放键开始');
+  prefetchNext();                                 // 起播后就把下一首备好
 }
 function playIdx(i) {
   var L = listOf();
@@ -617,9 +679,11 @@ function playIdx(i) {
   start(S.queue[S.qi]);
 }
 function next() {
-  var i = nextIndex(1);
+  // 优先用预取时定好的那一首，保证地址已在缓存里、能同步起播
+  var i = (S.nextQi >= 0 && S.nextQi < S.queue.length) ? S.nextQi : nextIndex(1);
   if (i < 0) return;
   S.qi = i;
+  S.nextQi = -1;
   start(S.queue[i]);
 }
 function prev() {
@@ -638,7 +702,7 @@ function togglePlay() {
   }
   if (!audio.src) { start(S.cur); return; }
   if (audio.paused) safePlay('播放失败，试试下一首');
-  else audio.pause();
+  else safePause();
 }
 function toggleFav(s) {
   var k = keyOf(s), i;
@@ -655,9 +719,22 @@ audio.addEventListener('pause', paint);
 audio.addEventListener('waiting', function () { el.artbox.style.opacity = '.5'; });
 audio.addEventListener('playing', function () { el.artbox.style.opacity = ''; });
 audio.addEventListener('canplay', function () { el.artbox.style.opacity = ''; });
-audio.addEventListener('ended', function () {
+var lastAdvance = 0;
+function advance() {
+  var now = Date.now();
+  if (now - lastAdvance < 1500) return;     // ended 与进度兜底只生效一个
+  lastAdvance = now;
   if (S.mode === 1) { audio.currentTime = 0; safePlay(); return; }
   next();
+}
+
+audio.addEventListener('ended', advance);
+
+// 中段预取下一首；背景里 ended 偶尔不触发，用播放进度兜底
+audio.addEventListener('timeupdate', function () {
+  if (!(audio.duration > 0) || !isFinite(audio.duration)) return;
+  if (audio.currentTime / audio.duration > 0.3) prefetchNext();
+  if (!audio.paused && audio.duration - audio.currentTime < 0.25) advance();
 });
 audio.addEventListener('error', function () { if (S.cur) toast('音频加载失败'); });
 audio.addEventListener('loadedmetadata', function () { el.tdur.textContent = fmt(audio.duration); });
@@ -798,7 +875,12 @@ el.seek.addEventListener('change', function () {
 });
 
 mediaHooks();
-document.addEventListener('visibilitychange', function () { if (!document.hidden) paint(); });
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) return;
+  paint();
+  // 后台被系统拒绝的起播，回到前台补上
+  if (retryPending && wantPlay && audio.paused) safePlay();
+});
 
 /* ---------- 启动 ---------- */
 render();
