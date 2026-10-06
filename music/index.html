@@ -130,6 +130,13 @@ body.hasbar #list{padding-bottom:96px}
 .loading{display:flex;flex-direction:column;align-items:center;gap:12px;padding:54px 18px;color:var(--dim);font-size:13.5px;text-align:center}
 .spin{width:22px;height:22px;border:2px solid #2a2a30;border-top-color:var(--fg);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.plcard{display:flex;align-items:center;gap:12px;padding:8px 18px}
+.plcard:active{background:#101012}
+.plcard img,.plcard .pcov{width:54px;height:54px;border-radius:8px;object-fit:cover;flex:none;background:#16161a}
+.plcard .pcov{display:flex;align-items:center;justify-content:center;color:#38383f;font-size:18px}
+.plcard .pi{flex:1;min-width:0}
+.plcard .pn{font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plcard .ps{font-size:12px;color:var(--dim);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:16px}
 .chip{font-size:12.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:7px 13px;background:none}
 .chip:active{color:var(--fg);border-color:#36363d}
@@ -240,7 +247,13 @@ body.hasbar #list{padding-bottom:96px}
   <div class="card">
     <h3>音源地址</h3>
     <p>留空恢复默认。默认：<br>https://music-api.gdstudio.xyz/api.php</p>
-    <input id="dlgApi" type="text" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <input id="dlgApi" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://…/api.php">
+    <h3 style="margin-top:18px">歌单搜索代理</h3>
+    <p>网易云的歌单搜索接口没有跨域许可，浏览器直连会被挡，需要你自己的代理转发。<br>
+       填法：<b>代理地址 + 编码后的目标地址</b>，例如<br>
+       <code>https://你的域名/?url=</code><br>
+       留空则关闭歌单搜索（仍可用链接或 ID 打开歌单）。</p>
+    <input id="dlgProxy" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://xxx.workers.dev/?url=">
     <div class="acts">
       <button class="sec" id="dlgCancel">取消</button>
       <button class="pri" id="dlgOk">保存</button>
@@ -349,6 +362,8 @@ var S = {
 try { S.fav = JSON.parse(ls('lcs.fav') || '[]') || []; } catch (e) { S.fav = []; }
 S.nextQi = -1;              // 已规划好的下一首在队列里的下标
 S.pl = null;                // 当前打开的歌单
+S.plRes = { loading: false, q: '', list: [], err: '', total: 0 };   // 歌单搜索结果
+S.proxy = ls('lcs.proxy') || '';   // 歌单搜索代理
 if (MODES.indexOf(MODES[S.mode]) < 0) S.mode = 0;
 if (BRS.indexOf(S.q) < 0) S.q = 999;
 
@@ -384,7 +399,7 @@ function safePause() {
 var el = {};
 ['gear','tabs','sbox','kw','go','list','bar','bcov','bname','bart','bplay','bnext','bfav',
  'player','close','stage','artbox','art','artph','lyric','pname','part','seek','tcur','tdur',
- 'pprev','pplay','pnext','pmode','pqual','pfav','toast','dlg','dlgApi','dlgOk','dlgCancel'
+ 'pprev','pplay','pnext','pmode','pqual','pfav','toast','dlg','dlgApi','dlgProxy','dlgOk','dlgCancel'
 ].forEach(function (id) { el[id] = document.getElementById(id); });
 
 var ICO = {
@@ -702,6 +717,7 @@ function plHeaderHtml() {
         : '<div class="cov" style="width:56px;height:56px;border-radius:8px">♪</div>')
     + '<div class="pi"><div class="pn">' + esc(p.name) + '</div>'
     + '<div class="ps">' + esc(sub.join(' · ')) + '</div></div>'
+    + (S.plRes && S.plRes.list.length ? '<button class="pr" id="plBack">返回</button>' : '')
     + '<button class="pr" id="plReload">重载</button>'
     + '</div>';
 }
@@ -712,8 +728,8 @@ var TOPLISTS = [
 ];
 
 function plEmptyHtml() {
-  var h = '<div class="empty">把网易云歌单链接粘到上面的输入框<br>'
-        + '<span style="color:#3f3f46">music.163.com/playlist?id=3778678</span>'
+  var h = '<div class="empty">输入关键词搜歌单，或把歌单链接 / ID 粘进来<br>'
+        + '<span style="color:#3f3f46">' + (S.proxy ? '例如：周杰伦' : '搜歌单需先在设置里配置代理') + '</span>'
         + '<div class="chips">';
   for (var i = 0; i < TOPLISTS.length; i++) {
     h += '<button class="chip" data-pl="' + TOPLISTS[i][0] + '">' + TOPLISTS[i][1] + '</button>';
@@ -721,11 +737,111 @@ function plEmptyHtml() {
   return h + '</div></div>';
 }
 
-function plLoadingHtml() {
+function plLoadingHtml(msg) {
   return '<div class="loading"><div class="spin"></div>'
-    + '<div>正在加载歌单… 已等待 <span id="plElapsed">0 秒</span>'
+    + '<div>' + esc(msg) + '… 已等待 <span id="plElapsed">0 秒</span>'
     + '<br><span style="color:#3f3f46">大歌单可能要一分钟，先别走开</span></div>'
     + '<button class="chip" id="plCancel">取消</button></div>';
+}
+
+/* ---------- 歌单关键词搜索 ----------
+   网易云的歌单搜索接口没有 CORS 许可，也没有 JSONP，浏览器直连必被拦。
+   所以走用户自建的代理：<代理地址><encodeURIComponent(目标地址)>，见设置页。 */
+var NETSEARCH = 'https://music.163.com/api/search/get/web';
+
+function searchPlaylists(kw) {
+  kw = String(kw == null ? '' : kw).trim();
+  if (!kw) return;
+
+  if (!S.proxy) {
+    switchTab('pl');
+    S.pl = null;
+    S.plRes = { loading: false, q: kw, list: [], total: 0,
+      err: '歌单搜索需要先在设置里填「歌单搜索代理」。也可以直接把歌单链接或 ID 粘到输入框。' };
+    render();
+    return;
+  }
+
+  stopPlTimer();
+  if (plCtl) { try { plCtl.abort(); } catch (e) {} plCtl = null; }
+  S.pl = null;
+  S.plRes = { loading: true, q: kw, list: [], err: '', total: 0 };
+  switchTab('pl');
+  render();
+  startPlTimer();
+
+  var target = NETSEARCH + '?s=' + encodeURIComponent(kw) + '&type=1000&limit=30&offset=0&total=true';
+  var url = S.proxy + encodeURIComponent(target);
+  var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  plCtl = ctl;
+  var timer = setTimeout(function () { if (ctl) { try { ctl.abort(); } catch (e) {} } }, 30000);
+
+  fetch(url, { signal: ctl ? ctl.signal : undefined, mode: 'cors' })
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (j) {
+      clearTimeout(timer);
+      if (!S.plRes || S.plRes.q !== kw) return;
+      var res = (j && (j.result || j)) || {};
+      var list = Array.isArray(res.playlists) ? res.playlists : [];
+      S.plRes.loading = false;
+      S.plRes.list = list;
+      S.plRes.total = res.playlistCount || list.length;
+      stopPlTimer(); render();
+      toast(list.length ? ('找到 ' + list.length + ' 个歌单') : '没有相关歌单');
+    })
+    .catch(function (e) {
+      clearTimeout(timer);
+      if (!S.plRes || S.plRes.q !== kw) return;
+      S.plRes.loading = false;
+      S.plRes.err = '搜索失败。检查代理地址是否可用，或者直接把歌单链接粘进来。';
+      stopPlTimer(); render();
+    });
+}
+
+function fmtCount(n) {
+  n = Number(n) || 0;
+  if (n >= 100000000) return (n / 100000000).toFixed(1) + '亿';
+  if (n >= 10000) return (n / 10000).toFixed(1) + '万';
+  return String(n);
+}
+
+function plResHeaderHtml() {
+  var ps = S.plRes;
+  return '<div class="plhead" style="padding-bottom:2px"><div class="pi">'
+    + '<div class="pn">' + esc(ps.q) + ' 的歌单</div>'
+    + '<div class="ps">共 ' + fmtCount(ps.total || ps.list.length) + ' 个，显示前 ' + ps.list.length + ' 个</div>'
+    + '</div></div>';
+}
+
+function plCardsHtml(list) {
+  var h = '';
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i], cov = p.coverImgUrl || '', sub = [];
+    if (p.creator && p.creator.nickname) sub.push(p.creator.nickname);
+    if (p.trackCount) sub.push(p.trackCount + ' 首');
+    if (p.playCount) sub.push(fmtCount(p.playCount) + ' 播放');
+    h += '<div class="plcard" data-open="' + esc(String(p.id)) + '">'
+      + (cov
+          ? '<img loading="lazy" src="' + esc(cov) + '" alt="">'
+          : '<div class="pcov">♪</div>')
+      + '<div class="pi"><div class="pn">' + esc(p.name || '未命名歌单') + '</div>'
+      + '<div class="ps">' + esc(sub.join(' · ')) + '</div></div></div>';
+  }
+  return h;
+}
+
+function rowsHtml(L) {
+  var h = '';
+  for (var i = 0; i < L.length; i++) {
+    var s = L[i], pid = picIdOf(s), f = isFav(s);
+    h += '<div class="row' + (S.curKey && keyOf(s) === S.curKey ? ' on' : '') + '" data-i="' + i + '">'
+      + '<div class="cov">' + (pid ? '<img loading="lazy" src="' + esc(picUrl(pid, 100)) + '" alt="">' : '♪') + '</div>'
+      + '<div class="meta"><div class="nm">' + esc(s.name) + '</div>'
+      + '<div class="ar">' + esc(artists(s)) + '</div></div>'
+      + '<button class="hb' + (f ? ' on' : '') + '" data-fav="' + i + '">' + (f ? '\u2665' : '\u2661') + '</button>'
+      + '</div>';
+  }
+  return h;
 }
 
 /* ---------- 渲染 ---------- */
@@ -747,33 +863,41 @@ function setArt(img, ph, pid, size) {
   img.onerror = function () { img.hidden = true; ph.hidden = false; };
 }
 function render() {
-  var L = listOf(), h = '';
+  var L = listOf();
 
   if (S.tab === 'pl') {
-    h += plHeaderHtml();
-    if (S.pl && S.pl.loading) { el.list.innerHTML = h + plLoadingHtml(); return; }
-    if (S.pl && S.pl.err) {
-      el.list.innerHTML = h + '<div class="loading">' + esc(S.pl.err)
+    var pl = S.pl, ps = S.plRes;
+
+    if (pl && pl.loading) { el.list.innerHTML = plLoadingHtml('正在加载歌单'); return; }
+    if (pl && pl.err) {
+      el.list.innerHTML = '<div class="loading">' + esc(pl.err)
+        + '<div class="chips"><button class="chip" id="plRetry">重试</button>'
+        + (ps.list.length ? '<button class="chip" id="plBack">返回搜索结果</button>' : '')
+        + '</div></div>';
+      return;
+    }
+    if (pl && pl.name) {
+      if (!L.length) { el.list.innerHTML = plHeaderHtml() + '<div class="empty">这个歌单没有取到曲目</div>'; return; }
+      el.list.innerHTML = plHeaderHtml() + rowsHtml(L);
+      return;
+    }
+    if (ps && ps.loading) { el.list.innerHTML = plLoadingHtml('正在搜索歌单'); return; }
+    if (ps && ps.err) {
+      el.list.innerHTML = '<div class="loading">' + esc(ps.err)
         + '<div class="chips"><button class="chip" id="plRetry">重试</button></div></div>';
       return;
     }
-    if (!L.length) { el.list.innerHTML = h + plEmptyHtml(); return; }
-  } else if (!L.length) {
-    h = '<div class="empty">' + (S.tab === 'fav' ? '还没有收藏的歌曲' : '输入关键词开始搜索') + '</div>';
+    if (ps && ps.list.length) { el.list.innerHTML = plResHeaderHtml() + plCardsHtml(ps.list); return; }
+    el.list.innerHTML = plEmptyHtml();
+    return;
   }
 
-  if (!L.length) { el.list.innerHTML = h; return; }
-
-  for (var i = 0; i < L.length; i++) {
-    var s = L[i], pid = picIdOf(s), f = isFav(s);
-    h += '<div class="row' + (S.curKey && keyOf(s) === S.curKey ? ' on' : '') + '" data-i="' + i + '">'
-      + '<div class="cov">' + (pid ? '<img loading="lazy" src="' + esc(picUrl(pid, 100)) + '" alt="">' : '♪') + '</div>'
-      + '<div class="meta"><div class="nm">' + esc(s.name) + '</div>'
-      + '<div class="ar">' + esc(artists(s)) + '</div></div>'
-      + '<button class="hb' + (f ? ' on' : '') + '" data-fav="' + i + '">' + (f ? '\u2665' : '\u2661') + '</button>'
-      + '</div>';
+  if (!L.length) {
+    el.list.innerHTML = '<div class="empty">'
+      + (S.tab === 'fav' ? '还没有收藏的歌曲' : '输入关键词开始搜索') + '</div>';
+    return;
   }
-  el.list.innerHTML = h;
+  el.list.innerHTML = rowsHtml(L);
 }
 function paint() {
   el.pmode.textContent = MODES[S.mode];
@@ -968,6 +1092,7 @@ function closePlayer() { el.player.classList.remove('open'); el.stage.classList.
 
 el.gear.addEventListener('click', function () {
   el.dlgApi.value = (S.api === DEF_API) ? '' : S.api;
+  el.dlgProxy.value = S.proxy || '';
   el.dlg.classList.add('show');
 });
 el.dlgCancel.addEventListener('click', function () { el.dlg.classList.remove('show'); });
@@ -975,8 +1100,10 @@ el.dlgOk.addEventListener('click', function () {
   var v = el.dlgApi.value.trim();
   S.api = v || DEF_API;
   lss('lcs.api', S.api);
+  S.proxy = el.dlgProxy.value.trim();
+  lss('lcs.proxy', S.proxy);
   el.dlg.classList.remove('show');
-  toast('音源已更新');
+  toast('设置已更新');
 });
 el.dlg.addEventListener('click', function (e) { if (e.target === el.dlg) el.dlg.classList.remove('show'); });
 
@@ -995,6 +1122,8 @@ function doSearch() {
   // 粘进来的是歌单链接/ID 就直接开歌单
   var pid = parsePlaylistId(kw);
   if (pid) { el.kw.blur(); openPlaylist(pid); return; }
+  // 在歌单页里输的是关键词 → 搜歌单
+  if (S.tab === 'pl') { el.kw.blur(); searchPlaylists(kw); return; }
   el.kw.blur();
   toast('搜索中…');
   apiSearch(kw).then(function (j) {
@@ -1015,13 +1144,23 @@ el.list.addEventListener('click', function (e) {
   // 歌单相关按钮
   var pl = e.target.closest('[data-pl]');
   if (pl) { openPlaylist(pl.getAttribute('data-pl')); return; }
-  if (e.target.id === 'plReload' || e.target.id === 'plRetry') {
+  var card = e.target.closest('[data-open]');
+  if (card) { openPlaylist(card.getAttribute('data-open')); return; }
+  if (e.target.id === 'plBack') {
+    S.pl = null;
+    render();
+    return;
+  }
+  if (e.target.id === 'plReload') { if (S.pl) openPlaylist(S.pl.id); return; }
+  if (e.target.id === 'plRetry') {
     if (S.pl) openPlaylist(S.pl.id);
+    else if (S.plRes && S.plRes.q) searchPlaylists(S.plRes.q);
     return;
   }
   if (e.target.id === 'plCancel') {
     if (plCtl) { try { plCtl.abort(); } catch (err) {} }
     stopPlTimer();
+    if (S.plRes) S.plRes.loading = false;
     S.pl = null;
     render();
     toast('已取消');
