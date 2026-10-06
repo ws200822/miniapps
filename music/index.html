@@ -112,6 +112,12 @@ body.hasbar #list{padding-bottom:96px}
 .foot{display:flex;align-items:center;justify-content:space-between;padding:2px 0 0;flex:none}
 .tag{font-size:12px;color:var(--dim);padding:6px 11px;border:1px solid var(--line);border-radius:999px}
 .tag.on{color:var(--fg);border-color:#36363d}
+.fgroup{display:flex;align-items:center;gap:8px}
+.star{width:36px;height:36px;flex:none;color:#3f3f46;padding:0;
+  transition:color .15s,transform .12s}
+.star svg{width:22px;height:22px;fill:currentColor}
+.star.on{color:var(--fg)}
+.star:active{transform:scale(.86)}
 
 #toast{position:fixed;left:50%;bottom:calc(100px + env(safe-area-inset-bottom));z-index:40;
   transform:translateX(-50%) translateY(6px);background:rgba(30,30,34,.96);color:#eaeaea;
@@ -159,6 +165,9 @@ body.hasbar #list{padding-bottom:96px}
     <div class="nm" id="bname"></div>
     <div class="ar" id="bart"></div>
   </div>
+  <button id="bfav" class="star" aria-label="收藏" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M12 2.4l2.96 6.02 6.64.97-4.8 4.68 1.13 6.61L12 17.56 6.07 20.68 7.2 14.07 2.4 9.39l6.64-.97z"/></svg>
+  </button>
   <button id="bplay" class="ic" aria-label="播放暂停"></button>
   <button id="bnext" class="ic" aria-label="下一首">
     <svg viewBox="0 0 24 24"><path d="M15.8 5.5H18v13h-2.2zM5 5.5v13L15.4 12z"/></svg>
@@ -198,9 +207,13 @@ body.hasbar #list{padding-bottom:96px}
   </div>
 
   <div class="foot">
-    <button id="pmode" class="tag">列表循环</button>
-    <button id="pqual" class="tag">无损</button>
-    <button id="pfav" class="tag">收藏</button>
+    <button id="pfav" class="star" aria-label="收藏" aria-pressed="false">
+      <svg viewBox="0 0 24 24"><path d="M12 2.4l2.96 6.02 6.64.97-4.8 4.68 1.13 6.61L12 17.56 6.07 20.68 7.2 14.07 2.4 9.39l6.64-.97z"/></svg>
+    </button>
+    <div class="fgroup">
+      <button id="pmode" class="tag">列表循环</button>
+      <button id="pqual" class="tag">无损</button>
+    </div>
   </div>
 </section>
 
@@ -351,7 +364,7 @@ function safePause() {
 }
 
 var el = {};
-['gear','tabs','sbox','kw','go','list','bar','bcov','bname','bart','bplay','bnext',
+['gear','tabs','sbox','kw','go','list','bar','bcov','bname','bart','bplay','bnext','bfav',
  'player','close','stage','artbox','art','artph','lyric','pname','part','seek','tcur','tdur',
  'pprev','pplay','pnext','pmode','pqual','pfav','toast','dlg','dlgApi','dlgOk','dlgCancel'
 ].forEach(function (id) { el[id] = document.getElementById(id); });
@@ -537,6 +550,7 @@ function syncLyric(t) {
   }
   if (idx === S.lyrIdx) return;
   S.lyrIdx = idx;
+  mediaLyric(idx >= 0 && S.lyric[idx] ? S.lyric[idx].s : '');
   var ps = el.lyric.children;
   for (var i = 0; i < ps.length; i++) ps[i].classList.toggle('on', i === idx);
   if (idx >= 0 && ps[idx]) {
@@ -598,8 +612,10 @@ function paint() {
   el.pname.textContent = s.name || '';
   el.part.textContent = artists(s);
   var f = isFav(s);
-  el.pfav.textContent = f ? '已收藏' : '收藏';
   el.pfav.classList.toggle('on', f);
+  el.bfav.classList.toggle('on', f);
+  el.pfav.setAttribute('aria-pressed', f ? 'true' : 'false');
+  el.bfav.setAttribute('aria-pressed', f ? 'true' : 'false');
   var icon = audio.paused ? ICO.play : ICO.pause;
   el.pplay.innerHTML = icon;
   el.bplay.innerHTML = icon;
@@ -611,15 +627,30 @@ function paint() {
 }
 
 /* ---------- 播放控制 ---------- */
+var mediaCur = null;       // 媒体会话当前曲目
+var mediaLine = '';        // 标题里正在显示的歌词行（空 = 回落成歌名）
+
 function mediaSet(s) {
   if (!('mediaSession' in navigator)) return;
   try {
+    mediaCur = s;
     var art = picUrl(picIdOf(s), 500);
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: s.name || '', artist: artists(s), album: nameOf(s.album) || '音乐',
+      title: mediaLine || s.name || '',
+      artist: artists(s), album: nameOf(s.album) || '音乐',
       artwork: art ? [{ src: art, sizes: '500x500', type: 'image/jpg' }] : []
     });
   } catch (e) {}
+}
+
+/* 把当前歌词行推到锁屏 / 灵动岛标题。
+   只在整行变化时才写 metadata —— 高频写会被 iOS 限流并导致封面闪烁 */
+function mediaLyric(line) {
+  if (!('mediaSession' in navigator) || !mediaCur) return;
+  line = String(line == null ? '' : line).trim();
+  if (line === mediaLine) return;
+  mediaLine = line;
+  mediaSet(mediaCur);
 }
 function mediaHooks() {
   if (!('mediaSession' in navigator)) return;
@@ -650,6 +681,7 @@ function start(s) {
   paint();
   render();
   loadLyric(s);
+  mediaLine = '';                   // 换歌清空标题里的歌词行
   mediaSet(s);
   el.seek.value = 0;
   el.tcur.textContent = '0:00';
@@ -862,6 +894,7 @@ el.pqual.addEventListener('click', function () {
   });
 });
 el.pfav.addEventListener('click', function () { if (S.cur) toggleFav(S.cur); });
+el.bfav.addEventListener('click', function () { if (S.cur) toggleFav(S.cur); });
 
 el.seek.addEventListener('input', function () {
   seeking = true;
