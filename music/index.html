@@ -338,6 +338,8 @@ function picUrl(pid, size) {
 
 /* ---------- 状态 ---------- */
 var DEF_API = 'https://music-api.gdstudio.xyz/api.php';
+// 内置的歌单搜索代理（Cloudflare Pages，_worker.js 里实现）
+var DEF_PROXY = 'https://miniapps-proxy.pages.dev/netease-proxy?url=';
 var BRS = [999, 320, 192, 128];
 var QLAB = { 999: '无损', 320: '320K', 192: '192K', 128: '128K' };
 var MODES = ['列表循环', '单曲循环', '随机播放'];
@@ -363,7 +365,7 @@ try { S.fav = JSON.parse(ls('lcs.fav') || '[]') || []; } catch (e) { S.fav = [];
 S.nextQi = -1;              // 已规划好的下一首在队列里的下标
 S.pl = null;                // 当前打开的歌单
 S.plRes = { loading: false, q: '', list: [], err: '', total: 0 };   // 歌单搜索结果
-S.proxy = ls('lcs.proxy') || '';   // 歌单搜索代理
+S.proxy = ls('lcs.proxy') || DEF_PROXY;   // 歌单搜索代理（留空则用内置默认）
 if (MODES.indexOf(MODES[S.mode]) < 0) S.mode = 0;
 if (BRS.indexOf(S.q) < 0) S.q = 999;
 
@@ -747,7 +749,10 @@ function plLoadingHtml(msg) {
 /* ---------- 歌单关键词搜索 ----------
    网易云的歌单搜索接口没有 CORS 许可，也没有 JSONP，浏览器直连必被拦。
    所以走用户自建的代理：<代理地址><encodeURIComponent(目标地址)>，见设置页。 */
-var NETSEARCH = 'https://music.163.com/api/search/get/web';
+var NETSEARCH = 'https://music.163.com/api/search/get';
+/* 注意：不要用 /api/search/get/web —— 网易云对海外 IP 的那个接口返回加密数据，
+   而代理多半跑在海外（Cloudflare/Netlify），拿到的 result 是一串密文。
+   去掉 /web 的老接口不触发这个限制。 */
 
 function searchPlaylists(kw) {
   kw = String(kw == null ? '' : kw).trim();
@@ -770,7 +775,7 @@ function searchPlaylists(kw) {
   render();
   startPlTimer();
 
-  var target = NETSEARCH + '?s=' + encodeURIComponent(kw) + '&type=1000&limit=30&offset=0&total=true';
+  var target = NETSEARCH + '?s=' + encodeURIComponent(kw) + '&type=1000&limit=30&offset=0';
   var url = S.proxy + encodeURIComponent(target);
   var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   plCtl = ctl;
@@ -1092,7 +1097,7 @@ function closePlayer() { el.player.classList.remove('open'); el.stage.classList.
 
 el.gear.addEventListener('click', function () {
   el.dlgApi.value = (S.api === DEF_API) ? '' : S.api;
-  el.dlgProxy.value = S.proxy || '';
+  el.dlgProxy.value = (S.proxy === DEF_PROXY) ? '' : (S.proxy || '');
   el.dlg.classList.add('show');
 });
 el.dlgCancel.addEventListener('click', function () { el.dlg.classList.remove('show'); });
@@ -1100,7 +1105,7 @@ el.dlgOk.addEventListener('click', function () {
   var v = el.dlgApi.value.trim();
   S.api = v || DEF_API;
   lss('lcs.api', S.api);
-  S.proxy = el.dlgProxy.value.trim();
+  S.proxy = el.dlgProxy.value.trim() || DEF_PROXY;
   lss('lcs.proxy', S.proxy);
   el.dlg.classList.remove('show');
   toast('设置已更新');
